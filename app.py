@@ -1,13 +1,12 @@
 from flask import Flask, render_template, request, redirect
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
 DATA_FILE = "data.json"
 
-# 固定の時間枠
 SLOTS = [
     "09:00-10:30",
     "10:40-12:10",
@@ -20,11 +19,17 @@ SLOTS = [
 ]
 
 
+# ----------------------
+# データ
+# ----------------------
 def load_data():
     if not os.path.exists(DATA_FILE):
         return []
     with open(DATA_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+        try:
+            return json.load(f)
+        except:
+            return []
 
 
 def save_data(data):
@@ -32,29 +37,44 @@ def save_data(data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
+# ----------------------
+# メイン画面
+# ----------------------
 @app.route("/")
 def index():
     reservations = load_data()
 
     now = datetime.now()
-    today = now.strftime("%Y-%m-%d")
+    today = now.date()
+    today_str = now.strftime("%Y-%m-%d")
+    end_date = today + timedelta(days=7)
     current_time = now.strftime("%H:%M")
 
-    # カレンダー作成
-    calendar = {}
-
+    # 未来だけ抽出（過去は消す）
+    weekly = []
     for r in reservations:
-        date = r["date"]
-        if date not in calendar:
-            calendar[date] = []
-        calendar[date].append(r)
+        r_date = datetime.strptime(r["date"], "%Y-%m-%d").date()
+        if r_date >= today:
+            weekly.append(r)
 
-    # 使用中判定
+    # 日付ごとにまとめる
+    grouped = {}
+    for r in weekly:
+        grouped.setdefault(r["date"], []).append(r)
+
+    grouped = dict(sorted(grouped.items()))
+
+    # 予約済みスロット
+    reserved_slots = {}
+    for r in reservations:
+        reserved_slots.setdefault(r["date"], []).append(r["slot"])
+
+    # 使用中判定（今日だけ）
     in_use = False
     current_user = None
 
     for r in reservations:
-        if r["date"] != today:
+        if r["date"] != today_str:
             continue
 
         start, end = r["slot"].split("-")
@@ -66,27 +86,34 @@ def index():
 
     return render_template(
         "index.html",
-        reservations=reservations,
-        calendar=calendar,
-        today=today,
+        grouped=grouped,
+        today=today_str,
         in_use=in_use,
         current_user=current_user,
-        slots=SLOTS
+        slots=SLOTS,
+        reserved_slots=reserved_slots
     )
 
 
+# ----------------------
+# 予約追加
+# ----------------------
 @app.route("/add", methods=["POST"])
 def add():
     name = request.form["name"]
     date = request.form["date"]
     slot = request.form["slot"]
 
+    # 過去禁止
+    if datetime.strptime(date, "%Y-%m-%d").date() < datetime.now().date():
+        return "過去は予約できません <a href='/'>戻る</a>"
+
     reservations = load_data()
 
     # 重複チェック
     for r in reservations:
         if r["date"] == date and r["slot"] == slot:
-            return "この時間は予約済み！<br><a href='/'>戻る</a>"
+            return "その時間は予約済み <a href='/'>戻る</a>"
 
     reservations.append({
         "name": name,
@@ -98,16 +125,32 @@ def add():
     return redirect("/")
 
 
-@app.route("/delete/<int:index>")
-def delete(index):
+# ----------------------
+# 削除
+# ----------------------
+@app.route("/delete", methods=["POST"])
+def delete():
     reservations = load_data()
 
-    if 0 <= index < len(reservations):
-        reservations.pop(index)
+    target_date = request.form["date"]
+    target_slot = request.form["slot"]
+    target_name = request.form["name"]
 
-    save_data(reservations)
+    new_list = [
+        r for r in reservations
+        if not (
+            r["date"] == target_date and
+            r["slot"] == target_slot and
+            r["name"] == target_name
+        )
+    ]
+
+    save_data(new_list)
     return redirect("/")
 
 
+# ----------------------
+# 起動
+# ----------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    app.run(debug=True)
