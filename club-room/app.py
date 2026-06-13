@@ -1,11 +1,11 @@
 from flask import Flask, render_template, request, redirect
-import json
+import psycopg2
 import os
 from datetime import datetime
 
 app = Flask(__name__)
 
-DATA_FILE = "data.json"
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
 WEEKDAYS = ["月", "火", "水", "木", "金", "土", "日"]
 
@@ -21,90 +21,101 @@ SLOTS = [
 ]
 
 
-# ----------------------
-# データ読み込み
-# ----------------------
-def load_data():
-    if not os.path.exists(DATA_FILE):
-        return []
-
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        try:
-            return json.load(f)
-        except:
-            return []
+def get_connection():
+    return psycopg2.connect(DATABASE_URL)
 
 
-# ----------------------
-# データ保存
-# ----------------------
-def save_data(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+# テーブル作成
+conn = get_connection()
+cur = conn.cursor()
+
+cur.execute("""
+CREATE TABLE IF NOT EXISTS reservations (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    date TEXT NOT NULL,
+    slot TEXT NOT NULL
+)
+""")
+
+conn.commit()
+cur.close()
+conn.close()
 
 
-# ----------------------
-# メイン画面
-# ----------------------
 @app.route("/")
 def index():
-
-    reservations = load_data()
 
     now = datetime.now()
     today_str = now.strftime("%Y-%m-%d")
 
-    # 選択された日付（指定がなければ今日）
     selected_date = request.args.get("date", today_str)
 
-    # 曜日取得
     date_obj = datetime.strptime(selected_date, "%Y-%m-%d")
     selected_day = WEEKDAYS[date_obj.weekday()]
 
-    # 選択した日の予約を時間順で取得
-    selected_reservations = sorted(
-        [r for r in reservations if r["date"] == selected_date],
-        key=lambda x: x["slot"]
-    )
+    conn = get_connection()
+    cur = conn.cursor()
 
-    # ----------------------
+    cur.execute("""
+    SELECT name, date, slot
+    FROM reservations
+    WHERE date=%s
+    ORDER BY slot
+    """, (selected_date,))
+
+    rows = cur.fetchall()
+
+    reservations = []
+
+    for row in rows:
+        reservations.append({
+            "name": row[0],
+            "date": row[1],
+            "slot": row[2]
+        })
+
     # 使用中判定
-    # ----------------------
     in_use = False
     current_user = None
 
     now_time = now.time()
 
-    for r in reservations:
+    cur.execute("""
+    SELECT name, slot
+    FROM reservations
+    WHERE date=%s
+    """, (today_str,))
 
-        if r["date"] != today_str:
-            continue
+    today_rows = cur.fetchall()
 
-        start_str, end_str = r["slot"].split("-")
+    for row in today_rows:
+
+        start_str, end_str = row[1].split("-")
 
         start_time = datetime.strptime(start_str, "%H:%M").time()
         end_time = datetime.strptime(end_str, "%H:%M").time()
 
         if start_time <= now_time <= end_time:
             in_use = True
-            current_user = r["name"]
+            current_user = row[0]
             break
+
+    cur.close()
+    conn.close()
 
     return render_template(
         "index.html",
         today=today_str,
         selected_date=selected_date,
         selected_day=selected_day,
-        reservations=selected_reservations,
+        reservations=reservations,
         in_use=in_use,
         current_user=current_user,
         slots=SLOTS
     )
 
 
-# ----------------------
-# 予約追加
-# ----------------------
 @app.route("/add", methods=["POST"])
 def add():
 
@@ -112,62 +123,60 @@ def add():
     date = request.form["date"]
     slot = request.form["slot"]
 
-    # 過去の日付は禁止
     if datetime.strptime(date, "%Y-%m-%d").date() < datetime.now().date():
         return "過去の日付は予約できません"
 
-    reservations = load_data()
+    conn = get_connection()
+    cur = conn.cursor()
 
-    # 重複チェック
-    for r in reservations:
-        if r["date"] == date and r["slot"] == slot:
-            return "その時間帯は予約済みです"
+    cur.execute("""
+    SELECT *
+    FROM reservations
+    WHERE date=%s AND slot=%s
+    """, (date, slot))
 
-    reservations.append({
-        "name": name,
-        "date": date,
-        "slot": slot
-    })
+    if cur.fetchone():
+        cur.close()
+        conn.close()
+        return "その時間帯は予約済みです"
 
-    # 日付→時間帯の順で並び替え
-    reservations = sorted(
-        reservations,
-        key=lambda x: (x["date"], x["slot"])
-    )
+    cur.execute("""
+    INSERT INTO reservations (name, date, slot)
+    VALUES (%s, %s, %s)
+    """, (name, date, slot))
 
-    save_data(reservations)
+    conn.commit()
+
+    cur.close()
+    conn.close()
 
     return redirect("/?date=" + date)
 
 
-# ----------------------
-# 予約削除
-# ----------------------
 @app.route("/delete", methods=["POST"])
 def delete():
-
-    reservations = load_data()
 
     target_date = request.form["date"]
     target_slot = request.form["slot"]
     target_name = request.form["name"]
 
-    reservations = [
-        r for r in reservations
-        if not (
-            r["date"] == target_date
-            and r["slot"] == target_slot
-            and r["name"] == target_name
-        )
-    ]
+    conn = get_connection()
+    cur = conn.cursor()
 
-    save_data(reservations)
+    cur.execute("""
+    DELETE FROM reservations
+    WHERE date=%s
+    AND slot=%s
+    AND name=%s
+    """, (target_date, target_slot, target_name))
+
+    conn.commit()
+
+    cur.close()
+    conn.close()
 
     return redirect("/?date=" + target_date)
 
 
-# ----------------------
-# 起動
-# ----------------------
 if __name__ == "__main__":
     app.run(debug=True)
